@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>创建知识库 · 混合检索知识库</title>
+<link rel="stylesheet" href="/static/style.css" />
+<style>
+  .kb-del-overlay {
+    display: none; position: fixed; inset: 0; z-index: 4000;
+    align-items: center; justify-content: center; padding: 20px;
+    box-sizing: border-box; background: rgba(0, 0, 0, 0.45);
+  }
+  .kb-del-overlay.is-open { display: flex; }
+  @media (prefers-color-scheme: dark) { .kb-del-overlay { background: rgba(0, 0, 0, 0.7); } }
+</style>
+</head>
+<body>
+<nav class="topnav" role="banner">
+  <a class="topnav__brand" href="/"><span class="topnav__brand-mark" aria-hidden="true">K</span>混合检索知识库</a>
+  <div class="topnav__links" aria-label="主导航">
+    <a class="nav-link is-active" href="/create">创建</a>
+    <a class="nav-link" href="/upload">上传</a>
+    <a class="nav-link" href="/records">记录</a>
+    <a class="nav-link" href="/search">检索</a>
+  </div>
+</nav>
+
+<main class="wrap">
+  <header class="upload-page-head">
+    <h1 class="upload-page-title">创建知识库</h1>
+  </header>
+
+  <section class="card upload-card" aria-labelledby="sec-basic">
+    <div class="upload-card-head">
+      <div class="upload-card-icon upload-card-icon--blue" aria-hidden="true">📋</div>
+      <div>
+        <h2 class="upload-card-title" id="sec-basic">基本信息</h2>
+        <p class="upload-card-sub">创建一个新的知识库，系统将自动配置 ES 索引和 Milvus 向量集合</p>
+      </div>
+    </div>
+
+    <div class="upload-form-block">
+      <label class="upload-label" for="kbName"><span class="upload-req">*</span> 知识库名称</label>
+      <input type="text" id="kbName" class="upload-input" placeholder="如：浙农商柜面业务知识库" autocomplete="off" />
+      <p class="upload-hint">支持中文名称，系统会自动生成内部英文 ID</p>
+    </div>
+    <p id="kbErr" class="err" hidden role="alert"></p>
+    <p id="kbMsg" class="msg" hidden role="status"></p>
+  </section>
+
+  <section class="card upload-card" aria-labelledby="sec-list">
+    <div class="upload-card-head">
+      <div class="upload-card-icon upload-card-icon--amber" aria-hidden="true">📚</div>
+      <div>
+        <h2 class="upload-card-title" id="sec-list">已有知识库</h2>
+      </div>
+    </div>
+    <div id="kbList"></div>
+    <p id="listErr" class="err" hidden role="alert"></p>
+    <div class="upload-danger-wrap">
+      <button type="button" class="btn-new btn-new--secondary upload-btn-danger" id="btnDeleteKb" style="color:var(--danger);border-color:color-mix(in srgb, var(--danger) 40%, var(--border))">删除选中知识库及全部数据</button>
+    </div>
+  </section>
+
+  <div class="action-bar-new">
+    <button type="button" class="btn-new btn-new--secondary" onclick="window.location='/'">返回首页</button>
+    <button type="button" class="btn-new btn-new--primary" id="btnCreateKb">创建知识库 <span class="arrow">→</span></button>
+  </div>
+</main>
+
+<div class="kb-del-overlay" id="kbDelOverlay" role="dialog" aria-modal="true" aria-labelledby="kbDelTitle">
+  <div class="confirm-box" id="kbDelBox">
+    <p class="confirm-box__title" id="kbDelTitle">删除知识库</p>
+    <p class="confirm-box__msg" id="kbDelMsg"></p>
+    <div class="confirm-box__actions">
+      <button type="button" class="btn-new btn-new--secondary" id="kbDelCancel">取消</button>
+      <button type="button" class="btn-new btn-new--primary" id="kbDelOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  var selectedKb = "";
+
+  async function loadKbList() {
+    $("listErr").hidden = true;
+    try {
+      var r = await fetch("/api/kb");
+      var list = await KB.reqJson(r);
+      renderKbList(list);
+    } catch (e) {
+      $("listErr").textContent = "加载失败: " + (e.message || e);
+      $("listErr").hidden = false;
+    }
+  }
+
+  function renderKbList(list) {
+    var c = $("kbList");
+    if (!list.length) {
+      c.innerHTML = '<div class="illu-empty"><div class="illu-empty__icon">📭</div><p class="illu-empty__text"><strong>暂无知识库</strong><br>在上方创建第一个知识库</p></div>';
+      return;
+    }
+    c.innerHTML = list.map(function (kb) {
+      var sel = kb.id === selectedKb ? " is-selected" : "";
+      return '<div class="kb-card' + sel + '" data-kbid="' + KB.escAttr(kb.id) + '">' +
+        '<div class="kb-card__icon">📁</div>' +
+        '<div class="kb-card__body">' +
+          '<div class="kb-card__name">' + KB.escHtml(kb.name) + '</div>' +
+          '<div style="font-size:0.78rem;color:var(--muted)">' + (kb.doc_count || 0) + ' 条记录 · ' + (kb.created_at || "").slice(0, 10) + '</div>' +
+        '</div>' +
+        '<div class="kb-card__actions">' +
+          '<a href="/upload?kb=' + encodeURIComponent(kb.id) + '" class="btn-view" style="text-decoration:none;margin-right:6px">上传</a>' +
+          '<a href="/search?kb=' + encodeURIComponent(kb.id) + '" class="btn-view" style="text-decoration:none">检索</a>' +
+        '</div>' +
+        '</div>';
+    }).join("");
+    c.querySelectorAll(".kb-card").forEach(function (el) {
+      el.addEventListener("click", function () {
+        selectedKb = el.getAttribute("data-kbid");
+        renderKbList(list);
+      });
+    });
+  }
+
+  $("btnCreateKb").addEventListener("click", async function () {
+    $("kbErr").hidden = true; $("kbMsg").hidden = true;
+    var name = $("kbName").value.trim();
+    if (!name) { $("kbErr").textContent = "请填写知识库名称"; $("kbErr").hidden = false; return; }
+    KB.busy($("btnCreateKb"), true);
+    try {
+      var r = await fetch("/api/kb", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name })
+      });
+      var created = await KB.reqJson(r);
+      $("kbMsg").textContent = "知识库「" + created.name + "」创建成功";
+      $("kbMsg").hidden = false;
+      KB.toast("知识库已创建", "ok");
+      $("kbName").value = "";
+      await loadKbList();
+      setTimeout(function () {
+        window.location.href = "/upload?kb=" + encodeURIComponent(created.id);
+      }, 1200);
+    } catch (e) {
+      $("kbErr").textContent = String(e.message || e);
+      $("kbErr").hidden = false;
+    } finally { KB.busy($("btnCreateKb"), false); }
+  });
+
+  $("btnDeleteKb").addEventListener("click", function () {
+    if (!selectedKb) { KB.toast("请先在下方列表中选择一个知识库", "err"); return; }
+    var nameEl = document.querySelector(".kb-card.is-selected .kb-card__name");
+    var displayName = nameEl ? nameEl.textContent.trim() : selectedKb;
+    $("kbDelMsg").textContent = "将永久删除知识库「" + displayName + "」及其中全部数据（ES 索引 + Milvus 集合）。确定？";
+    $("kbDelOverlay").classList.add("is-open");
+  });
+
+  function closeKbDelConfirm() { $("kbDelOverlay").classList.remove("is-open"); }
+
+  $("kbDelCancel").addEventListener("click", closeKbDelConfirm);
+  $("kbDelOverlay").addEventListener("click", function (e) {
+    if (e.target === $("kbDelOverlay")) closeKbDelConfirm();
+  });
+  $("kbDelBox").addEventListener("click", function (e) { e.stopPropagation(); });
+
+  $("kbDelOk").addEventListener("click", async function () {
+    if (!selectedKb) { closeKbDelConfirm(); return; }
+    var kb = selectedKb;
+    closeKbDelConfirm();
+    KB.busy($("btnDeleteKb"), true);
+    try {
+      var r = await fetch("/api/kb/" + encodeURIComponent(kb), { method: "DELETE" });
+      await KB.reqJson(r);
+      KB.toast("已删除知识库", "ok");
+      selectedKb = "";
+      await loadKbList();
+    } catch (e) {
+      KB.toast("删除失败: " + (e.message || e), "err");
+    } finally { KB.busy($("btnDeleteKb"), false); }
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && $("kbDelOverlay").classList.contains("is-open")) closeKbDelConfirm();
+  });
+
+  loadKbList();
+})();
+</script>
+</body>
+</html>

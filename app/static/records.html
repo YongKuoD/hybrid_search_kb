@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>文档记录 · 混合检索知识库</title>
+<link rel="stylesheet" href="/static/style.css" />
+<style>
+  .status-badge {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: 0.72rem; font-weight: 600; white-space: nowrap;
+  }
+  .status-badge--ok { background: #ecfdf5; color: #047857; }
+  .status-badge--partial { background: #fef3c7; color: #b45309; }
+  .status-badge--none { background: var(--bg-muted,#f1f5f9); color: var(--muted,#999); }
+  @media (prefers-color-scheme: dark) {
+    .status-badge--ok { background: rgba(16,185,129,0.12); color: #6ee7b7; }
+    .status-badge--partial { background: rgba(245,158,11,0.12); color: #fcd34d; }
+    .status-badge--none { background: rgba(148,163,184,0.1); color: #94a3b8; }
+  }
+
+  .chunk-panel { display: none; }
+  .chunk-panel.is-open { display: block; }
+  .chunk-toolbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 10px; padding: 8px 0;
+  }
+  .chunk-toolbar label {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 0.78rem; color: var(--text-secondary,#555); cursor: pointer;
+    margin: 0;
+  }
+  .chunk-table-wrap { overflow-x: auto; border: 1px solid var(--border,#e2e8f0); border-radius: 10px; }
+  .chunk-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .chunk-table th {
+    text-align: left; padding: 9px 10px; background: var(--bg-muted,#f8fafc);
+    font-weight: 600; color: var(--text-secondary,#555);
+    border-bottom: 2px solid var(--border,#e2e8f0); white-space: nowrap;
+  }
+  .chunk-table td { padding: 8px 10px; border-bottom: 1px solid var(--border,#e2e8f0); vertical-align: middle; }
+  .chunk-table tr:last-child td { border-bottom: none; }
+  .chunk-table tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+  .chunk-table tr.row-imported td { background: #f0fdf6; }
+  @media (prefers-color-scheme: dark) { .chunk-table tr.row-imported td { background: rgba(16,185,129,0.04); } }
+  .chunk-table .col-cb { width: 32px; text-align: center; }
+  .chunk-table .col-idx { width: 48px; }
+  .chunk-table .col-content { min-width: 200px; cursor: pointer; }
+  .chunk-table .col-content:hover .chunk-preview { color: var(--accent,#1a56db); }
+  .chunk-table .col-status { width: 70px; text-align: center; }
+
+  .chunk-preview {
+    margin: 0; white-space: pre-wrap; font-family: var(--mono,monospace);
+    font-size: 0.74rem; line-height: 1.5; color: var(--text-secondary,#444);
+    max-height: 60px; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+
+  .meta-mini {
+    font-size: 0.7rem; color: var(--text-secondary); max-width: 120px;
+    display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    vertical-align: middle;
+  }
+  /* 弹窗内展示完整字段，不截断 */
+  .modal__meta .meta-tag {
+    display: inline-block; max-width: none; overflow: visible;
+    white-space: normal; word-break: break-word;
+    font-size: 0.78rem; line-height: 1.45; vertical-align: middle;
+  }
+
+  .td-actions { white-space: nowrap; }
+
+  .empty-state { text-align: center; padding: 48px 24px; color: var(--muted,#999); }
+  .empty-state__icon { font-size: 2.5rem; margin-bottom: 12px; }
+  .empty-state__text { font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<nav class="topnav" role="banner">
+  <a class="topnav__brand" href="/"><span class="topnav__brand-mark" aria-hidden="true">K</span>混合检索知识库</a>
+  <div class="topnav__links" aria-label="主导航">
+    <a class="nav-link" href="/create">创建</a>
+    <a class="nav-link" href="/upload">上传</a>
+    <a class="nav-link is-active" href="/records">记录</a>
+    <a class="nav-link" href="/search">检索</a>
+  </div>
+</nav>
+
+<main class="wrap">
+  <header class="upload-page-head">
+    <h1 class="upload-page-title">文档记录</h1>
+    <p class="upload-page-desc">查看已上传的文档及其分块明细，选择分块导入到向量库（ES + Milvus）</p>
+  </header>
+
+  <section class="card upload-card">
+    <div class="upload-card-head">
+      <div class="upload-card-icon upload-card-icon--amber" aria-hidden="true">📂</div>
+      <div style="flex:1;min-width:0">
+        <h2 class="upload-card-title">选择知识库</h2>
+        <p class="upload-card-sub">选择知识库后加载其中的文档记录</p>
+      </div>
+    </div>
+    <select id="kbSelect" class="upload-select"></select>
+    <p id="kbErr" class="err" hidden role="alert"></p>
+  </section>
+
+  <!-- 文档列表 -->
+  <section class="card upload-card" id="docSection" style="display:none">
+    <div class="upload-card-head">
+      <div style="flex:1;min-width:0">
+        <h2 class="upload-card-title" id="docTitle">文档列表</h2>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:50px">#</th>
+            <th>文档名称</th>
+            <th style="width:70px">分块</th>
+            <th style="width:100px">导入状态</th>
+            <th style="width:120px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="docBody"></tbody>
+      </table>
+    </div>
+    <p id="docErr" class="err" hidden role="alert"></p>
+  </section>
+
+  <!-- 分块详情 -->
+  <section class="card upload-card chunk-panel" id="chunkPanel">
+    <div class="upload-card-head">
+      <button type="button" class="btn-view" id="btnBackToList" style="margin-right:8px">← 返回列表</button>
+      <div style="flex:1;min-width:0">
+        <h2 class="upload-card-title" id="chunkTitle">分块明细</h2>
+      </div>
+    </div>
+
+    <div class="chunk-toolbar">
+      <label><input type="checkbox" id="cbSelectAll" /> 全选</label>
+      <span style="font-size:0.78rem;color:var(--muted,#888)" id="selectedCount">已选 0 个</span>
+      <span style="flex:1"></span>
+      <button type="button" class="btn-new btn-new--secondary" id="btnImportAll" style="font-size:0.78rem;padding:6px 14px">全部导入</button>
+      <button type="button" class="btn-new btn-new--primary" id="btnImportSel" style="font-size:0.78rem;padding:6px 14px" disabled>导入选中</button>
+    </div>
+
+    <div class="chunk-table-wrap">
+      <table class="chunk-table" id="chunkTable">
+        <thead>
+          <tr>
+            <th class="col-cb">☐</th>
+            <th class="col-idx">#</th>
+            <th>编号</th>
+            <th>需求模块</th>
+            <th>交易功能</th>
+            <th>类型</th>
+            <th>名称</th>
+            <th class="col-content">内容</th>
+            <th class="col-status">状态</th>
+          </tr>
+        </thead>
+        <tbody id="chunkBody"></tbody>
+      </table>
+    </div>
+    <p id="chunkErr" class="err" hidden role="alert"></p>
+  </section>
+</main>
+
+<!-- 内容弹窗 -->
+<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal__head">
+      <span class="modal__title" id="modalTitle">分块详情</span>
+      <button class="modal__close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal__meta" id="modalMeta"></div>
+    <div class="modal__body">
+      <pre class="modal__text" id="modalText"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- 删除确认 -->
+<div class="confirm-overlay" id="delConfirmOverlay" role="dialog" aria-modal="true" aria-labelledby="delConfirmTitle">
+  <div class="confirm-box" id="delConfirmBox">
+    <p class="confirm-box__title" id="delConfirmTitle">删除文档</p>
+    <p class="confirm-box__msg" id="delConfirmMsg">确定删除该文档及其全部分块记录？已导入向量库的数据不受影响。</p>
+    <div class="confirm-box__actions">
+      <button type="button" class="btn-new btn-new--secondary" id="delConfirmCancel">取消</button>
+      <button type="button" class="btn-new btn-new--primary" id="delConfirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  var kbListCache = [];
+  var currentDocId = null;
+  var currentDocName = "";
+  var allChunks = [];
+  var selectedSet = {};
+  var pendingDeleteId = null;
+
+  function statusBadge(s) {
+    var cls = s === "已全部导入" ? "status-badge--ok" : s === "部分导入" ? "status-badge--partial" : "status-badge--none";
+    return '<span class="status-badge ' + cls + '">' + KB.escHtml(s) + '</span>';
+  }
+
+  // ═══ KB 选择 ═══
+  async function loadKbs() {
+    $("kbErr").hidden = true;
+    var sel = $("kbSelect");
+    try {
+      var r = await fetch("/api/kb");
+      var list = await KB.reqJson(r);
+      kbListCache = list;
+      sel.innerHTML = '<option value="">请选择知识库</option>';
+      list.forEach(function (it) {
+        var o = document.createElement("option");
+        o.value = it.id;
+        o.textContent = it.name;
+        sel.appendChild(o);
+      });
+      var urlKb = new URLSearchParams(window.location.search).get("kb");
+      if (urlKb && [...sel.options].some(function (o) { return o.value === urlKb; })) {
+        sel.value = urlKb;
+        loadDocList();
+        var urlDoc = new URLSearchParams(window.location.search).get("doc");
+        if (urlDoc) {
+          currentDocId = urlDoc;
+          loadChunkDetail(urlDoc);
+        }
+      } else {
+        var saved = localStorage.getItem("last_kb_id");
+        if (saved && [...sel.options].some(function (o) { return o.value === saved; })) {
+          sel.value = saved;
+          loadDocList();
+        }
+      }
+    } catch (e) {
+      $("kbErr").textContent = "加载知识库失败: " + (e.message || e);
+      $("kbErr").hidden = false;
+    }
+  }
+
+  $("kbSelect").addEventListener("change", function () {
+    if (this.value) {
+      localStorage.setItem("last_kb_id", this.value);
+      hideChunkPanel();
+      loadDocList();
+    } else {
+      $("docSection").style.display = "none";
+      hideChunkPanel();
+    }
+  });
+
+  // ═══ 文档列表 ═══
+  async function loadDocList() {
+    var kb = $("kbSelect").value, err = $("docErr");
+    err.hidden = true;
+    if (!kb) return;
+
+    try {
+      var r = await fetch("/api/kb/" + encodeURIComponent(kb) + "/documents");
+      var docs = await KB.reqJson(r);
+      $("docSection").style.display = "";
+      renderDocTable(docs);
+    } catch (e) {
+      err.textContent = String(e.message || e);
+      err.hidden = false;
+    }
+  }
+
+  function renderDocTable(docs) {
+    var tb = $("docBody");
+    if (!docs.length) {
+      tb.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="empty-state__icon">📭</div><p class="empty-state__text"><strong>暂无文档记录</strong></p><p style="font-size:0.82rem;color:var(--muted)">上传 XMind 文件后在此显示</p></div></td></tr>';
+      return;
+    }
+    tb.innerHTML = docs.map(function (d, i) {
+      return '<tr>' +
+        '<td>' + (i + 1) + '</td>' +
+        '<td><span style="font-size:0.84rem;color:var(--text)">' + KB.escHtml(d.filename || "未知") + '</span></td>' +
+        '<td>' + d.chunk_count + '</td>' +
+        '<td>' + statusBadge(d.status) + '</td>' +
+        '<td class="td-actions">' +
+          '<button type="button" class="btn-view" data-did="' + KB.escAttr(d.id) + '" data-name="' + KB.escAttr(d.filename || "") + '">查看</button> ' +
+          '<button type="button" class="table-action-del" data-did="' + KB.escAttr(d.id) + '">删除</button>' +
+        '</td>' +
+        '</tr>';
+    }).join("");
+
+    tb.querySelectorAll("button.btn-view").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        currentDocId = this.getAttribute("data-did");
+        currentDocName = this.getAttribute("data-name") || "";
+        loadChunkDetail(currentDocId);
+      });
+    });
+    tb.querySelectorAll("button.table-action-del").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        confirmDeleteDoc(btn.getAttribute("data-did"));
+      });
+    });
+  }
+
+  function confirmDeleteDoc(did) {
+    pendingDeleteId = did;
+    $("delConfirmOverlay").classList.add("is-open");
+  }
+
+  function closeDeleteConfirm() {
+    pendingDeleteId = null;
+    $("delConfirmOverlay").classList.remove("is-open");
+  }
+
+  $("delConfirmCancel").addEventListener("click", closeDeleteConfirm);
+  $("delConfirmOverlay").addEventListener("click", function (e) {
+    if (e.target === $("delConfirmOverlay")) closeDeleteConfirm();
+  });
+
+  $("delConfirmOk").addEventListener("click", async function () {
+    if (!pendingDeleteId) { closeDeleteConfirm(); return; }
+    var did = pendingDeleteId;
+    closeDeleteConfirm();
+    var kb = $("kbSelect").value;
+    try {
+      var r = await fetch("/api/kb/" + encodeURIComponent(kb) + "/documents/" + encodeURIComponent(did), { method: "DELETE" });
+      await KB.reqJson(r);
+      KB.toast("已删除文档", "ok");
+      if (currentDocId === did) { hideChunkPanel(); }
+      await loadDocList();
+    } catch (e) {
+      KB.toast("删除失败: " + (e.message || e), "err");
+    }
+  });
+
+  // ═══ 分块详情 ═══
+  async function loadChunkDetail(docId) {
+    var kb = $("kbSelect").value, err = $("chunkErr");
+    err.hidden = true;
+    try {
+      var r = await fetch("/api/kb/" + encodeURIComponent(kb) + "/documents/" + encodeURIComponent(docId));
+      var data = await KB.reqJson(r);
+      allChunks = data.chunks || [];
+      if (data.document) currentDocName = data.document.filename || "";
+      selectedSet = {};
+      showChunkPanel();
+    } catch (e) {
+      err.textContent = String(e.message || e);
+      err.hidden = false;
+    }
+  }
+
+  function showChunkPanel() {
+    $("chunkTitle").textContent = currentDocName;
+    $("cbSelectAll").checked = false;
+    $("btnImportSel").disabled = true;
+    updateSelectedCount();
+    renderChunkTable();
+    $("docSection").style.display = "none";
+    $("chunkPanel").classList.add("is-open");
+    $("chunkPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function hideChunkPanel() {
+    $("chunkPanel").classList.remove("is-open");
+    $("chunkBody").innerHTML = "";
+    $("chunkTitle").textContent = "";
+    allChunks = [];
+    selectedSet = {};
+    currentDocId = null;
+    currentDocName = "";
+  }
+
+  function renderChunkTable() {
+    var tb = $("chunkBody");
+    if (!allChunks.length) {
+      tb.innerHTML = '<tr><td colspan="9"><div class="empty-state"><div class="empty-state__icon">📭</div><p class="empty-state__text">暂无分块数据</p></div></td></tr>';
+      return;
+    }
+    tb.innerHTML = allChunks.map(function (c) {
+      var imported = c.imported;
+      var checked = selectedSet[c.chunk_index] ? " checked" : "";
+      var disabled = imported ? " disabled" : "";
+      var rowClass = imported ? " row-imported" : "";
+      return '<tr class="' + rowClass + '">' +
+        '<td class="col-cb"><input type="checkbox" class="cb-chunk" data-idx="' + c.chunk_index + '"' + checked + disabled + ' /></td>' +
+        '<td class="col-idx">' + c.chunk_index + '</td>' +
+        '<td><span class="meta-mini" style="max-width:140px" title="' + KB.escAttr(c["编号"] || "") + '">' + KB.escHtml((c["编号"] || "—").substring(0, 18)) + '</span></td>' +
+        '<td><span class="meta-mini" style="max-width:200px" title="' + KB.escAttr(c["需求模块"] || "") + '">' + KB.escHtml((c["需求模块"] || "—").substring(0, 28)) + '</span></td>' +
+        '<td><span class="meta-mini" title="' + KB.escAttr(c["交易功能"] || "") + '">' + KB.escHtml((c["交易功能"] || "—").substring(0, 12)) + '</span></td>' +
+        '<td><span class="meta-mini">' + KB.escHtml(c["类型"] || "—") + '</span></td>' +
+        '<td><span class="meta-mini" title="' + KB.escAttr(c["名称"] || "") + '">' + KB.escHtml((c["名称"] || "—").substring(0, 16)) + '</span></td>' +
+        '<td class="col-content" onclick="openChunkModal(' + c.chunk_index + ')" title="点击查看完整内容"><pre class="chunk-preview">' + KB.escHtml((c["内容"] || "").substring(0, 100)) + '</pre></td>' +
+        '<td class="col-status">' + (imported ? '<span class="status-badge status-badge--ok">已导入</span>' : '<span class="status-badge status-badge--none">未导入</span>') + '</td>' +
+        '</tr>';
+    }).join("");
+
+    tb.querySelectorAll(".cb-chunk").forEach(function (cb) {
+      cb.addEventListener("change", function () {
+        var idx = parseInt(this.getAttribute("data-idx"));
+        if (this.checked) selectedSet[idx] = true; else delete selectedSet[idx];
+        updateSelectedCount();
+        $("btnImportSel").disabled = Object.keys(selectedSet).length === 0;
+        var allCbs = tb.querySelectorAll(".cb-chunk:not(:disabled)");
+        $("cbSelectAll").checked = allCbs.length > 0 && [...allCbs].every(function (c) { return c.checked; });
+      });
+    });
+  }
+
+  $("cbSelectAll").addEventListener("change", function () {
+    var check = this.checked;
+    var cbs = $("chunkBody").querySelectorAll(".cb-chunk:not(:disabled)");
+    cbs.forEach(function (cb) {
+      cb.checked = check;
+      var idx = parseInt(cb.getAttribute("data-idx"));
+      if (check) selectedSet[idx] = true; else delete selectedSet[idx];
+    });
+    updateSelectedCount();
+    $("btnImportSel").disabled = !check;
+  });
+
+  function updateSelectedCount() {
+    $("selectedCount").textContent = "已选 " + Object.keys(selectedSet).length + " 个";
+  }
+
+  // ═══ 导入 ═══
+  $("btnImportAll").addEventListener("click", async function () {
+    var unimported = allChunks.filter(function (c) { return !c.imported; });
+    if (!unimported.length) { KB.toast("所有分块均已导入", "ok"); return; }
+    await doImport(unimported.map(function (c) { return c.chunk_index; }));
+  });
+
+  $("btnImportSel").addEventListener("click", async function () {
+    var indices = Object.keys(selectedSet).map(Number).sort(function (a, b) { return a - b; });
+    if (!indices.length) { KB.toast("请先选择要导入的分块", "err"); return; }
+    await doImport(indices);
+  });
+
+  async function doImport(indices) {
+    var kb = $("kbSelect").value;
+    $("btnImportAll").disabled = true;
+    $("btnImportSel").disabled = true;
+    try {
+      var r = await fetch(
+        "/api/kb/" + encodeURIComponent(kb) + "/documents/" + encodeURIComponent(currentDocId) + "/import",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chunk_indices: indices }),
+        }
+      );
+      var result = await KB.reqJson(r);
+      KB.toast(result.message || "导入完成", "ok");
+      hideChunkPanel();
+      $("docSection").style.display = "";
+      await loadDocList();
+      $("docSection").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (e) {
+      KB.toast("导入失败: " + (e.message || e), "err");
+    } finally {
+      $("btnImportAll").disabled = false;
+      $("btnImportSel").disabled = false;
+    }
+  }
+
+  // ═══ 弹窗 ═══
+  window.openChunkModal = function (chunkIndex) {
+    var c = allChunks.find(function (x) { return x.chunk_index === chunkIndex; });
+    if (!c) return;
+    $("modalTitle").textContent = "分块 #" + c.chunk_index;
+    $("modalMeta").innerHTML =
+      (c["编号"] ? '<span class="meta-tag" style="background:#e0f2fe;padding:4px 10px;border-radius:8px">🔖 ' + KB.escHtml(c["编号"]) + '</span>' : '') +
+      (c["需求模块"] ? '<span class="meta-tag" style="background:var(--accent-soft);padding:4px 10px;border-radius:8px">📂 ' + KB.escHtml(c["需求模块"]) + '</span>' : '') +
+      (c["交易功能"] ? '<span class="meta-tag" style="background:var(--warn-bg);padding:4px 10px;border-radius:8px">🔀 ' + KB.escHtml(c["交易功能"]) + '</span>' : '') +
+      (c["类型"] ? '<span class="meta-tag" style="background:#ede9fe;padding:4px 10px;border-radius:8px">📌 ' + KB.escHtml(c["类型"]) + '</span>' : '') +
+      (c["名称"] ? '<span class="meta-tag" style="background:var(--ok-bg);padding:4px 10px;border-radius:8px">📝 ' + KB.escHtml(c["名称"]) + '</span>' : '') +
+      '<span style="font-size:0.72rem;color:var(--muted);margin-left:auto">' + (c["关联"] ? '关联: ' + KB.escHtml(c["关联"]) : '') + '</span>';
+    $("modalText").textContent = c["内容"] || "（无内容）";
+    $("modalOverlay").classList.add("is-open");
+  };
+
+  window.closeModal = function () { $("modalOverlay").classList.remove("is-open"); };
+
+  $("btnBackToList").addEventListener("click", function () {
+    hideChunkPanel();
+    $("docSection").style.display = "";
+    $("docSection").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    if ($("delConfirmOverlay").classList.contains("is-open")) { closeDeleteConfirm(); return; }
+    closeModal();
+  });
+
+  loadKbs();
+})();
+</script>
+</body>
+</html>

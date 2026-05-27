@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>上传文档 · 混合检索知识库</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<nav class="topnav" role="banner">
+  <a class="topnav__brand" href="/"><span class="topnav__brand-mark" aria-hidden="true">K</span>混合检索知识库</a>
+  <div class="topnav__links" aria-label="主导航">
+    <a class="nav-link" href="/create">创建</a>
+    <a class="nav-link is-active" href="/upload">上传</a>
+    <a class="nav-link" href="/records">记录</a>
+    <a class="nav-link" href="/search">检索</a>
+  </div>
+</nav>
+
+<main class="wrap">
+  <header class="upload-page-head">
+    <h1 class="upload-page-title">上传文档</h1>
+    <p class="upload-page-desc">上传 XMind 导图文件，系统自动解析为分块记录存入暂存区，之后在记录页选择导入向量库</p>
+  </header>
+
+  <section class="card upload-card">
+    <div class="upload-card-head">
+      <div class="upload-card-icon upload-card-icon--amber" aria-hidden="true">📂</div>
+      <div style="flex:1;min-width:0">
+        <h2 class="upload-card-title">选择知识库</h2>
+        <p class="upload-card-sub">选择目标知识库，上传的文件将解析并存为待导入分块</p>
+      </div>
+    </div>
+    <select id="kbSelect" class="upload-select"></select>
+    <p id="kbErr" class="err" hidden role="alert"></p>
+  </section>
+
+  <section class="card upload-card">
+    <div class="upload-card-head">
+      <div class="upload-card-icon upload-card-icon--green" aria-hidden="true">📄</div>
+      <div style="flex:1;min-width:0">
+        <h2 class="upload-card-title">上传文件</h2>
+        <p class="upload-card-sub">支持 .xmind 格式（可多选），解析后存入暂存区，上传完成自动跳转至记录页</p>
+      </div>
+    </div>
+
+    <div class="upload-dropzone" id="uploadArea">
+      <input type="file" id="fileInput" accept=".xmind" multiple />
+      <span class="upload-dropzone__label">点击选择 .xmind 文件（可多选）或拖拽到此处</span>
+      <span style="font-size:0.7rem;color:var(--muted)" id="uploadExtHint">请先选择知识库</span>
+    </div>
+
+    <div id="fileList" class="upload-filelist" style="display:none"></div>
+
+    <div class="upload-options-row">
+      <button type="button" class="btn-new btn-new--primary" id="btnUpload" disabled>上传并解析</button>
+    </div>
+
+    <p id="ingestErr" class="err" hidden role="alert"></p>
+    <p id="ingestMsg" class="msg" hidden role="status"></p>
+
+    <div id="resultActions" style="display:none;margin-top:14px;text-align:right">
+      <a id="gotoRecords" class="btn-new btn-new--primary" style="text-decoration:none">前往记录页选择导入 →</a>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  var pendingFiles = [];  // Array of {file: File, uid: string}
+
+  function currentKb() { return ($("kbSelect").value || "").trim(); }
+
+  async function loadKbs() {
+    $("kbErr").hidden = true;
+    var sel = $("kbSelect");
+    try {
+      var r = await fetch("/api/kb");
+      var list = await KB.reqJson(r);
+      sel.innerHTML = '<option value="">请选择知识库</option>';
+      list.forEach(function (it) {
+        var o = document.createElement("option");
+        o.value = it.id;
+        o.textContent = it.name;
+        sel.appendChild(o);
+      });
+      var urlKb = new URLSearchParams(window.location.search).get("kb");
+      if (urlKb && [...sel.options].some(function (o) { return o.value === urlKb; })) {
+        sel.value = urlKb;
+        updateHint();
+      }
+      var saved = localStorage.getItem("last_kb_id");
+      if (!sel.value && saved && [...sel.options].some(function (o) { return o.value === saved; })) {
+        sel.value = saved;
+        updateHint();
+      }
+    } catch (e) {
+      $("kbErr").textContent = "加载知识库失败: " + (e.message || e);
+      $("kbErr").hidden = false;
+    }
+  }
+
+  function updateHint() {
+    $("uploadExtHint").textContent = currentKb() ? "支持 .xmind 格式（可多选）" : "请先选择知识库";
+  }
+
+  $("kbSelect").addEventListener("change", function () {
+    if (currentKb()) localStorage.setItem("last_kb_id", currentKb());
+    updateHint();
+  });
+
+  // ── 文件选择（多文件） ──
+  function addFiles(fileList) {
+    var nonXmind = 0;
+    Array.from(fileList).forEach(function (f) {
+      if (!(f.name || "").toLowerCase().endsWith(".xmind")) { nonXmind++; return; }
+      if (pendingFiles.some(function (p) { return p.file.name === f.name && p.file.size === f.size; })) return;
+      pendingFiles.push({ file: f, uid: Math.random().toString(36).slice(2) + Date.now().toString(36) });
+    });
+    if (nonXmind > 0 && pendingFiles.length === 0) {
+      $("ingestErr").textContent = "仅支持 .xmind 文件格式";
+      $("ingestErr").hidden = false;
+    }
+    if (pendingFiles.length > 0) {
+      $("ingestErr").hidden = true;
+      $("ingestMsg").hidden = true;
+      $("resultActions").style.display = "none";
+      renderFileList();
+      $("btnUpload").disabled = false;
+    }
+  }
+
+  function removeFile(uid) {
+    pendingFiles = pendingFiles.filter(function (p) { return p.uid !== uid; });
+    if (pendingFiles.length === 0) {
+      $("fileList").style.display = "none";
+      $("fileList").innerHTML = "";
+      $("btnUpload").disabled = true;
+    } else {
+      renderFileList();
+    }
+  }
+
+  function renderFileList() {
+    $("fileList").style.display = "";
+    $("fileList").innerHTML = pendingFiles.map(function (p) {
+      return '<span class="upload-file-tag">' + KB.escHtml(p.file.name) +
+        '<button class="upload-file-tag-x" data-uid="' + KB.escAttr(p.uid) + '">×</button></span>';
+    }).join("");
+    $("fileList").querySelectorAll(".upload-file-tag-x").forEach(function (btn) {
+      btn.addEventListener("click", function () { removeFile(this.getAttribute("data-uid")); });
+    });
+  }
+
+  $("fileInput").addEventListener("click", function (e) { e.stopPropagation(); });
+  $("uploadArea").addEventListener("dragover", function (e) { e.preventDefault(); this.classList.add("upload-dropzone--drag"); });
+  $("uploadArea").addEventListener("dragleave", function () { this.classList.remove("upload-dropzone--drag"); });
+  $("uploadArea").addEventListener("drop", function (e) {
+    e.preventDefault();
+    this.classList.remove("upload-dropzone--drag");
+    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+  });
+  $("fileInput").addEventListener("change", function () {
+    if (this.files.length) { addFiles(this.files); this.value = ""; }
+  });
+
+  // ── 上传 ──
+  $("btnUpload").addEventListener("click", async function () {
+    var kb = currentKb();
+    if (!kb) { $("ingestErr").textContent = "请先选择知识库"; $("ingestErr").hidden = false; return; }
+    if (!pendingFiles.length) { $("ingestErr").textContent = "请先选择文件"; $("ingestErr").hidden = false; return; }
+
+    $("ingestErr").hidden = true;
+    $("ingestMsg").hidden = true;
+    $("resultActions").style.display = "none";
+    KB.busy($("btnUpload"), true);
+    $("btnUpload").disabled = true;
+
+    var total = pendingFiles.length;
+    var results = [];  // {filename, document_id, records, error}
+
+    for (var i = 0; i < total; i++) {
+      var pf = pendingFiles[i];
+      $("btnUpload").textContent = "解析中 " + (i + 1) + "/" + total + "...";
+      try {
+        var fd = new FormData();
+        fd.append("file", pf.file);
+        var r = await fetch("/api/kb/" + encodeURIComponent(kb) + "/upload", { method: "POST", body: fd });
+        var result = await KB.reqJson(r);
+        results.push({ filename: pf.file.name, document_id: result.document_id, records: result.records, error: null });
+      } catch (e) {
+        results.push({ filename: pf.file.name, document_id: null, records: 0, error: e.message || String(e) });
+      }
+    }
+
+    KB.busy($("btnUpload"), false);
+    $("btnUpload").textContent = "上传并解析";
+    pendingFiles = [];
+    $("fileList").style.display = "none";
+    $("fileList").innerHTML = "";
+    $("btnUpload").disabled = true;
+
+    var ok = results.filter(function (r) { return !r.error; });
+    var failed = results.filter(function (r) { return r.error; });
+
+    if (failed.length > 0) {
+      $("ingestErr").textContent = "部分上传失败: " + failed.map(function (f) { return f.filename + " (" + f.error + ")"; }).join("; ");
+      $("ingestErr").hidden = false;
+    }
+
+    if (ok.length === 0) return;
+
+    var totalRecords = ok.reduce(function (s, r) { return s + r.records; }, 0);
+    KB.toast("已解析 " + totalRecords + " 条分块 (" + ok.length + " 个文件)，跳转至记录页", "ok");
+
+    // 单文件 → 直接打开分块明细；多文件 → 打开文档列表
+    if (ok.length === 1) {
+      window.location.href = "/records?kb=" + encodeURIComponent(kb) + "&doc=" + encodeURIComponent(ok[0].document_id);
+    } else {
+      window.location.href = "/records?kb=" + encodeURIComponent(kb);
+    }
+  });
+
+  loadKbs();
+})();
+</script>
+</body>
+</html>

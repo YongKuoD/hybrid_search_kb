@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>混合检索知识库</title>
+<link rel="stylesheet" href="/static/style.css" />
+<style>
+  .wrap--home { max-width: 900px; }
+</style>
+</head>
+<body>
+<nav class="topnav" role="banner">
+  <a class="topnav__brand" href="/"><span class="topnav__brand-mark" aria-hidden="true">K</span>混合检索知识库</a>
+  <div class="topnav__links" aria-label="主导航">
+    <a class="nav-link" href="/create">创建</a>
+    <a class="nav-link" href="/upload">上传</a>
+    <a class="nav-link" href="/records">记录</a>
+    <a class="nav-link" href="/search">检索</a>
+  </div>
+</nav>
+
+<main class="wrap wrap--home">
+  <section class="home-hero">
+    <div class="home-hero__icon" aria-hidden="true">🔍</div>
+    <h1>混合检索知识库</h1>
+    <p>BM25 关键词匹配 + 向量语义检索，RRF 融合排序，支持 XMind 导图解析导入。基于 Elasticsearch + Milvus 双引擎架构。</p>
+    <div class="home-stats" id="homeStats">
+      <div class="home-stat"><div class="home-stat__num">—</div><div class="home-stat__label">知识库</div></div>
+      <div class="home-stat"><div class="home-stat__num">—</div><div class="home-stat__label">文档记录</div></div>
+      <div class="home-stat"><div class="home-stat__num">—</div><div class="home-stat__label">ES 状态</div></div>
+      <div class="home-stat"><div class="home-stat__num">—</div><div class="home-stat__label">Milvus 状态</div></div>
+    </div>
+  </section>
+
+  <div class="link-grid">
+    <a class="link-card" href="/create">
+      <div class="link-card__icon">📋</div>
+      <div class="link-card__title">创建知识库</div>
+      <div class="link-card__desc">新建知识库，配置 ES 索引与 Milvus 向量集合，为文档导入做好准备</div>
+    </a>
+    <a class="link-card" href="/upload">
+      <div class="link-card__icon">📄</div>
+      <div class="link-card__title">上传文档</div>
+      <div class="link-card__desc">上传 XMind 导图文件，自动解析模块、交易、流程与规则节点并入库</div>
+    </a>
+    <a class="link-card" href="/records">
+      <div class="link-card__icon">📚</div>
+      <div class="link-card__title">浏览记录</div>
+      <div class="link-card__desc">查看知识库中的全部记录，按模块和类型筛选，支持单条删除</div>
+    </a>
+    <a class="link-card" href="/search">
+      <div class="link-card__icon">🔍</div>
+      <div class="link-card__title">混合检索</div>
+      <div class="link-card__desc">BM25 + 向量 RRF 融合检索，高亮命中字段，按相关度排序</div>
+    </a>
+  </div>
+</main>
+
+<script src="/static/app.js"></script>
+<script>
+(async function () {
+  "use strict";
+  try {
+    var h = await fetch("/api/health");
+    var health = await h.json();
+    var esOk = health.es === "connected";
+    var mvOk = health.milvus === "connected";
+
+    var r = await fetch("/api/kb");
+    var kbs = await KB.reqJson(r);
+
+    var totalDocs = 0;
+    kbs.forEach(function (kb) { totalDocs += kb.doc_count || 0; });
+
+    var stats = document.querySelectorAll("#homeStats .home-stat__num");
+    stats[0].textContent = kbs.length;
+    stats[1].textContent = totalDocs;
+    if (esOk) { stats[2].textContent = "●"; stats[2].style.color = "var(--ok)"; }
+    else { stats[2].textContent = "✕"; stats[2].style.color = "var(--danger)"; }
+    if (mvOk) { stats[3].textContent = "●"; stats[3].style.color = "var(--ok)"; }
+    else { stats[3].textContent = "✕"; stats[3].style.color = "var(--danger)"; }
+  } catch (e) { /* ignore */ }
+})();
+</script>
+</body>
+</html>

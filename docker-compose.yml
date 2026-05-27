@@ -1,0 +1,132 @@
+# 一键启动: docker compose up -d
+# 含 ES + Milvus + etcd + MinIO + Web 应用
+#
+# 开发模式：代码通过 bind-mount 挂载进容器，修改即时生效无需 rebuild
+# 生产部署：取消 app.volumes 中的 bind-mount，用 Dockerfile COPY 代码
+
+version: "3.8"
+
+services:
+  # ─── Elasticsearch（BM25 关键词检索） ──────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: es_kb
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+      # 离线安装 IK：插件 zip 随仓库提供，无需外网
+      - ./plugins/elasticsearch:/usr/share/elasticsearch/plugins-offline:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -E 'green|yellow'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    command: >
+      bash -c "
+        if ! ./bin/elasticsearch-plugin list | grep -q analysis-ik; then
+          IK_ZIP=/usr/share/elasticsearch/plugins-offline/elasticsearch-analysis-ik-8.11.0.zip;
+          if [ -f \"$$IK_ZIP\" ]; then
+            echo '>>> 从本地安装 analysis-ik 插件...';
+            ./bin/elasticsearch-plugin install --batch \"file://$$IK_ZIP\" || {
+              echo '!!! IK 插件本地安装失败，ES 将以无中文分词模式启动';
+            };
+          else
+            echo '!!! 未找到本地插件包: '$$IK_ZIP;
+            echo '!!! 请将 elasticsearch-analysis-ik-8.11.0.zip 放入 plugins/elasticsearch/ 后重启';
+          fi;
+        else
+          echo '>>> analysis-ik 插件已安装';
+        fi;
+        echo '>>> 启动 Elasticsearch...';
+        /usr/local/bin/docker-entrypoint.sh elasticsearch
+      "
+
+  # ─── Milvus 依赖: etcd ────────────────────────────────────
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: milvus_etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── Milvus 依赖: MinIO ───────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: milvus_minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── Milvus（向量检索） ────────────────────────────────────
+  milvus:
+    image: milvusdb/milvus:v2.3.3
+    container_name: milvus_kb
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # ─── Web 应用 ─────────────────────────────────────────────
+  app:
+    image: knowledge-app:latest
+    container_name: knowledge-app 
+    ports:
+      - "8800:8800"
+    environment:
+      ES_HOST: ${ES_HOST:-elasticsearch}
+      ES_PORT: ${ES_PORT:-9200}
+      MILVUS_HOST: ${MILVUS_HOST:-milvus}
+      MILVUS_PORT: ${MILVUS_PORT:-19530}
+      EMBEDDING_API_URL: ${EMBEDDING_API_URL:-https://api.siliconflow.cn/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_API_MODEL: ${EMBEDDING_API_MODEL:-BAAI/bge-large-zh-v1.5}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-4096}
+      EMBEDDING_BATCH: ${EMBEDDING_BATCH:-32}
+    dns:
+      - ${DNS_SERVER:-223.5.5.5}
+    volumes:
+      # 代码目录 bind-mount：修改 host 上的 .py/.html 即时生效，无需 rebuild
+      - .:/app
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  es_data:

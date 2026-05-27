@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>知识检索 · 混合检索知识库</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<nav class="topnav" role="banner">
+  <a class="topnav__brand" href="/"><span class="topnav__brand-mark" aria-hidden="true">K</span>混合检索知识库</a>
+  <div class="topnav__links" aria-label="主导航">
+    <a class="nav-link" href="/create">创建</a>
+    <a class="nav-link" href="/upload">上传</a>
+    <a class="nav-link" href="/records">记录</a>
+    <a class="nav-link is-active" href="/search">检索</a>
+  </div>
+</nav>
+
+<main class="wrap search-page">
+  <header class="upload-page-head">
+    <h1 class="upload-page-title">混合检索</h1>
+    <p class="upload-page-desc">BM25 关键词 + 向量语义 RRF 融合检索，支持中文分词与高亮</p>
+  </header>
+
+  <section class="card upload-card">
+    <div class="upload-card-head">
+      <div class="upload-card-icon upload-card-icon--blue" aria-hidden="true">🔍</div>
+      <div><h2 class="upload-card-title">查询</h2></div>
+    </div>
+
+    <div class="search-layout" style="margin-bottom:10px">
+      <div class="field">
+        <label class="upload-label" style="margin-bottom:5px">知识库</label>
+        <select id="kbSelect" class="upload-select"></select>
+      </div>
+      <div class="field" style="flex:2">
+        <label class="upload-label" style="margin-bottom:5px">检索关键词</label>
+        <input type="search" id="q" class="upload-input" style="font-size:1.05rem;padding:0.75rem 1rem"
+          placeholder="输入关键词、模块名、交易功能或规则名…" autocomplete="off" enterkeyhint="search" />
+      </div>
+    </div>
+
+    <div class="search-filter-row">
+      <span style="font-size:0.78rem;font-weight:600;color:var(--text-secondary)">选项</span>
+      <label>返回条数</label>
+      <input type="number" id="topk" min="1" max="50" value="10" />
+      <label>BM25 阈值</label>
+      <input type="number" id="bm25Min" step="0.1" value="0" placeholder="0" style="width:75px" title="低于此分数的 BM25 结果将被过滤，0 表示不过滤" />
+      <label>向量阈值</label>
+      <input type="number" id="vecMin" step="0.01" value="0" placeholder="0" style="width:75px" title="低于此分数的向量结果将被过滤，0 表示不过滤（IP 内积分数）" />
+      <button type="button" class="btn-new btn-new--primary" id="btnSearch" style="margin-left:auto">检索</button>
+    </div>
+    <p id="searchErr" class="err" hidden role="alert"></p>
+  </section>
+
+  <div id="results" aria-live="polite"></div>
+  <p id="searchMeta" style="text-align:center;font-size:0.82rem;color:var(--muted);margin-top:8px" hidden></p>
+</main>
+
+<script src="/static/app.js"></script>
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+
+  function scoreCls(s) {
+    return s > 0.7 ? "hit-card__score--high" : s > 0.5 ? "hit-card__score--mid" : "hit-card__score--low";
+  }
+
+  async function loadKbs() {
+    var sel = $("kbSelect");
+    try {
+      var r = await fetch("/api/kb");
+      var list = await KB.reqJson(r);
+      sel.innerHTML = "";
+      list.forEach(function (it) {
+        var o = document.createElement("option");
+        o.value = it.id;
+        o.textContent = it.name;
+        sel.appendChild(o);
+      });
+      if (!sel.options.length) {
+        var o = document.createElement("option");
+        o.value = ""; o.textContent = "请先创建知识库"; o.disabled = true;
+        sel.appendChild(o);
+      }
+      // 恢复上次选择
+      var saved = localStorage.getItem("last_kb_id");
+      if (saved && [...sel.options].some(function (o) { return o.value === saved; })) {
+        sel.value = saved;
+      }
+      // URL 参数优先
+      var urlKb = new URLSearchParams(window.location.search).get("kb");
+      if (urlKb && [...sel.options].some(function (o) { return o.value === urlKb; })) {
+        sel.value = urlKb;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  $("kbSelect").addEventListener("change", function () {
+    if (this.value) localStorage.setItem("last_kb_id", this.value);
+  });
+
+  function buildMetaRow(src) {
+    var parts = [];
+    if (src["编号"]) parts.push('<span class="hit-meta-tag hit-meta-tag--id">🔖 ' + KB.escHtml(src["编号"]) + '</span>');
+    if (src["需求模块"]) parts.push('<span class="hit-meta-tag hit-meta-tag--module">📂 ' + KB.escHtml(src["需求模块"]) + '</span>');
+    if (src["交易功能"]) parts.push('<span class="hit-meta-tag hit-meta-tag--tx">🔀 ' + KB.escHtml(src["交易功能"]) + '</span>');
+    if (src["类型"]) parts.push('<span class="hit-meta-tag hit-meta-tag--type">📌 ' + KB.escHtml(src["类型"]) + '</span>');
+    if (src["名称"]) parts.push('<span class="hit-meta-tag hit-meta-tag--name">📝 ' + KB.escHtml(src["名称"]) + '</span>');
+    if (!parts.length) return "";
+    return '<div class="hit-card__meta">' + parts.join("") + "</div>";
+  }
+
+  function formatHighlight(highlight, src) {
+    if (!highlight || !Object.keys(highlight).length) return "";
+    return Object.entries(highlight).map(function (entry) {
+      var field = entry[0];
+      var snippets = entry[1];
+      return snippets.map(function (s) {
+        return '<div style="font-size:0.78rem;color:var(--ok);margin-bottom:4px">↳ ' +
+          KB.escHtml(field) + ': ...' + s + '...</div>';
+      }).join("");
+    }).join("");
+  }
+
+  async function doSearch() {
+    var err = $("searchErr"), out = $("results"), meta = $("searchMeta");
+    err.hidden = true; out.innerHTML = ""; meta.hidden = true;
+
+    var kb = ($("kbSelect").value || "").trim();
+    if (!kb) { err.textContent = "请选择知识库"; err.hidden = false; return; }
+    localStorage.setItem("last_kb_id", kb);
+
+    var q = $("q").value.trim();
+    if (!q) { err.textContent = "请输入检索内容"; err.hidden = false; return; }
+
+    $("btnSearch").disabled = true;
+    $("btnSearch").textContent = "检索中...";
+
+    try {
+      var topk = parseInt($("topk").value) || 10;
+      var bm25Min = parseFloat($("bm25Min").value) || 0;
+      var vecMin = parseFloat($("vecMin").value) || 0;
+      var r = await fetch("/api/kb/" + encodeURIComponent(kb) + "/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: q, top_k: topk, bm25_threshold: bm25Min, vector_threshold: vecMin }),
+      });
+      var j = await KB.reqJson(r);
+      var hits = j.results || [];
+
+      var st = j.stats;
+      var metaParts = ["共 " + hits.length + " 条结果"];
+      if (st) {
+        metaParts.push("BM25 " + st.bm25_filtered + "/" + st.bm25_total + (st.bm25_threshold > 0 ? " (≥" + st.bm25_threshold + ")" : ""));
+        metaParts.push("向量 " + st.vector_filtered + "/" + st.vector_total + (st.vector_threshold > 0 ? " (≥" + st.vector_threshold + ")" : ""));
+      }
+      meta.textContent = metaParts.join("  ·  ");
+      meta.hidden = false;
+
+      if (!hits.length) {
+        out.innerHTML = '<div class="illu-empty"><div class="illu-empty__icon">🔎</div><p class="illu-empty__text">没有匹配结果</p></div>';
+        return;
+      }
+
+      out.innerHTML = hits.map(function (h, i) {
+        var rrf = typeof h.rrf_score === "number" ? h.rrf_score.toFixed(4) : h.rrf_score;
+        var bm25 = h.bm25_score != null ? "BM25: " + h.bm25_score : "";
+        var vec = h.vector_score != null ? "向量: " + h.vector_score : "";
+        var scoreLabel = [bm25, vec].filter(Boolean).join(" · ");
+        var metaRow = buildMetaRow(h);
+        var hl = formatHighlight(h.highlight, h);
+
+        var contentHtml = "";
+        if (h["名称"]) contentHtml += '<div style="font-weight:600;margin-bottom:6px;color:var(--text)">' + KB.escHtml(h["名称"]) + '</div>';
+        if (h["内容"]) contentHtml += '<div style="margin-bottom:6px">' + KB.escHtml(h["内容"].substring(0, 300)) + (h["内容"].length > 300 ? "…" : "") + '</div>';
+        if (h["关联"]) contentHtml += '<div style="font-size:0.78rem;color:var(--muted)">关联: ' + KB.escHtml(h["关联"]) + '</div>';
+        if (!contentHtml) {
+          // 兼容旧字段
+          if (h["流程"]) contentHtml += '<div style="font-weight:600;margin-bottom:6px;color:var(--text)">' + KB.escHtml(h["流程"]) + '</div>';
+          if (h["步骤"]) contentHtml += '<div>' + KB.escHtml(h["步骤"]) + '</div>';
+        }
+
+        return '<div class="hit-card">' +
+          '<div class="hit-card__bar">' +
+            '<span class="hit-card__rank">' + (i + 1) + '</span>' +
+            '<span class="hit-card__score ' + scoreCls(h.rrf_score || 0) + '">RRF ' + rrf + '</span>' +
+            (scoreLabel ? '<span style="font-size:0.7rem;color:var(--muted)">' + scoreLabel + '</span>' : '') +
+          '</div>' +
+          metaRow +
+          '<div class="hit-card__body">' +
+            contentHtml +
+            (hl ? '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">' + hl + '</div>' : '') +
+          '</div>' +
+        '</div>';
+      }).join("");
+    } catch (e) {
+      err.textContent = String(e.message || e);
+      err.hidden = false;
+    } finally {
+      $("btnSearch").disabled = false;
+      $("btnSearch").textContent = "检索";
+    }
+  }
+
+  $("btnSearch").addEventListener("click", doSearch);
+  $("q").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") doSearch();
+  });
+
+  loadKbs();
+})();
+</script>
+</body>
+</html>
