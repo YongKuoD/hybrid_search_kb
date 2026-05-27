@@ -1,0 +1,17 @@
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 运行时产生的数据与缓存
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Python 相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.dockerignore
